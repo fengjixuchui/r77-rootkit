@@ -1,79 +1,98 @@
 # r77 Rootkit
 
-This *work in progress* ring 3 rootkit hides processes, files and directories
-from applications in user mode. Future implementation on modules, registry,
-services and possibly other entities is planned.
+## Ring 3 rootkit
 
-## A quick visualization
+r77 is a ring 3 Rootkit that hides following entities from all processes:
 
-Before/after rootkit is running. Items with the "**$77**" prefix are hidden.
+ - Files, directories, named pipes, scheduled tasks
+ - Processes
+ - CPU usage
+ - Registry keys & values
+ - TCP & UDP connections
 
-![](https://bytecode77.com/images/sites/hacking/payloads/r77-rootkit/taskmanager.gif)
-![](https://bytecode77.com/images/sites/hacking/payloads/r77-rootkit/explorer.gif)
+It is compatible with Windows 7 and Windows 10 in both x64 and x86 editions.
 
-## How it works
+## Hiding by prefix
 
-r77 uses MinHook, a hooking library that enables redirection of API calls from
-their original function to a custom one. This provides the opportunity to choose
-what, for instance, process enumerations should return and what should be
-hidden. In order to hook WinAPI functions globally, the rootkit DLL must be
-loaded as a thread in every running process. This can be done through
-AppInit_DLLs as well as DLL injection or using multiple routes. Install.exe
-drops the DLL to `%TEMP%\$77_{GUID}.dll` and registers it in AppInit_DLLs. The
-drop is required in the example in order to avoid file locking while testing.
-However, the utilizing application can use whatever route fits best, because
-once the DLL is loaded into the process, its payload is running.
+All entities where the name starts with `"$77"` are hidden.
 
-## AppInit_DLLs
+![](https://bytecode77.com/images/pages/r77-rootkit/hiding.png)
+
+The dynamic configuration system allows to hide processes by **PID** and TCP & UDP connections of specific ports. Any process can write to this registry key, either in HKEY_LOCAL_MACHINE or HKEY_CURRENT_USER (of any user).
+
+![](https://bytecode77.com/images/pages/r77-rootkit/config.png)
+
+The `$77config` key is hidden when RegEdit is injected with the rootkit.
+
+## Installer
+
+r77 is deployable using a single file `"Install.exe"`. It installs the r77 service that starts before the first user is logged on. This background process injects all currently running processes, as well as processes that spawn later. Two processes are needed to inject both 32-bit and 64-bit processes. Both processes are hidden by ID using the configuration system.
+
+`Uninstall.exe` removes r77 from the system and gracefully detaches the rootkit from all processes.
+
+## Child process hooking
+
+When a process creates a child process, the new process is injected before it can run any of its own instructions. The function `NtResumeThread` is always called when a new process is created. Therefore, it's a suitable target to hook. Because a 32-bit process can spawn a 64-bit child process and vice versa, the r77 service provides a named pipe to handle child process injection requests.
+
+In addition, there is a periodic check every 100ms for new processes that might have been missed by child process hooking. This is necessary because some processes are protected cannot be injected, such as services.exe.
+
+## In-memory injection
+
+The rootkit DLL (`r77-x86.dll` and `r77-x64.dll`) can be injected into a process from memory and doesn't need to be stored on the disk. **Reflective DLL injection** is used to achieve this. The DLL provides an exported function that when called, loads all sections of the DLL, handles dependency loading and relocations, and finally calls `DllMain`.
+
+## Fileless persistence
+
+The rootkit resides in the system memory and does not write any files to the disk. This is achieved in multiple stages.
+
+**Stage 1:** The installer creates two scheduled tasks for the 32-bit and the 64-bit r77 service. A scheduled task does require a file, named `$77svc32.job` and `$77svc64.job` to be stored, which is the only exception to the fileless concept. However, scheduled tasks are also hidden by prefix once the rootkit is running.
+
+The scheduled tasks start `powershell.exe` with following command line:
 
 ```
-HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows\AppInit_DLLs
+[Reflection.Assembly]::Load([Microsoft.Win32.Registry]::LocalMachine.OpenSubkey('SOFTWARE').GetValue('$77stager')).EntryPoint.Invoke($Null,$Null)
 ```
 
-A DLL registered in `AppInit_DLLs` is loaded into every process that is executed
-from this point. This also requires enabling it by setting `LoadAppInit_DLLs` to
-1 and additionally, `RequireSignedAppInit_DLLs` to 0, because the rootkit is not
-signed.
+The command is inline and does not require a .ps1 script. Here, the .NET Framework capabilities of PowerShell are utilized in order to load a C# executable from the registry and execute it in memory. Because the command line has a maximum length of 260 (MAX_PATH), there is only enough room to perform a simple `Assembly.Load().EntryPoint.Invoke()`.
 
-Setting the registry value under `HKEY_LOCAL_MACHINE` requires elevated
-privileges. After installation, the rootkit runs in user mode, however does not
-require any startup logic to re-install on reboot. A ring 0 rootkit in this
-instance would be a kernel mode driver (*.sys file) that also requires
-administrator privileges when installing.
+![](https://bytecode77.com/images/pages/r77-rootkit/scheduled-task.png)
+![](https://bytecode77.com/images/pages/r77-rootkit/stager.png)
 
-Also, because the AppInit_DLLs method is commonly used by malware, security
-software will likely block access to this registry value. r77 is not guaranteed
-to work while anti-virus software is running.
+**Stage 2:** The executed C# binary is the stager. It will create the r77 service processes using process hollowing. The r77 service is a native executable compiled in both 32-bit and 64-bit separately. The parent process is spoofed and set to winlogon.exe for additional obscurity. In addition, the two processes are hidden by ID and are not visible in the task manager.
 
-## Legitimacy
+![](https://bytecode77.com/images/pages/r77-rootkit/service.png)
 
-Rootkits are not illegal software. However, their reputation is considered low,
-because rootkits are primarily used to hide malware. So, at this point, I would
-like to point out that this is for educational / PoC purposes and I'm not
-responsible for developers misusing it.
+No executables or DLL's are ever stored on the disk. The stager is stored in the registry and loads the r77 service executable from its resources.
 
-However, high quality rootkits *are* used by security software in order to
-protect them from malware. Such rootkits are always implemented in kernel mode
-to make it impossible for malware to subvert installed security software.
-Maximum persistence can be achieved with ring -3 rootkits that are implemented
-in hardware itself. When done correctly, they cannot be removed in any way.
-These usually are BIOS firmware rootkits that add persistance by blocking
-installation attempts of the BIOS firmware.
+The PowerShell and .NET dependencies are present in a fresh installation of Windows 7 and Windows 10. Please review the [documentation](https://bytecode77.com/downloads/r77%20Rootkit%20Technical%20Documentation.pdf) for a complete description of the fileless initialization.
 
-## ToDo
+## Hooking
 
-This is a **work in progress / beta** state and is not complete. Following tasks
-are on the agenda, prior to final release:
+Detours is used to hook several functions from `ntdll.dll`. These low-level syscall wrappers are called by **any** WinAPI or framework implementation.
 
-1. **Installation:** The exemplary installation app should also consider injection into running processes.
-2. **Deinstallation:** The installation app should detach running threads and successively delete locked DLL files.
-3. **Other entities:** Hiding and obscuring modules, registry keys & values, services and other entities are also primary goals.
-4. File hiding is disabled in x86 processes, because it is currently unstable.
+ - NtQuerySystemInformation
+ - NtResumeThread
+ - NtQueryDirectoryFile
+ - NtQueryDirectoryFileEx
+ - NtEnumerateKey
+ - NtEnumerateValueKey
+ - NtDeviceIoControlFile
+
+## Test environment
+
+The Test Console can be used to inject r77 to or detach r77 from individual processes.
+
+![](https://bytecode77.com/images/pages/r77-rootkit/testconsole.png)
+
+## Technical Documentation
+
+Please read the [technical documentation](https://bytecode77.com/downloads/r77%20Rootkit%20Technical%20Documentation.pdf) to get a comprehensive and full overview of r77, how to deploy and integrate the rootkit and its internals.
 
 ## Downloads
 
-[![](https://bytecode77.com/images/shared/fileicons/zip.png) r77 Rootkit 0.6.0 Binaries.zip](https://bytecode77.com/downloads/hacking/payloads/r77%20Rootkit%200.6.0%20Binaries.zip)
+[![](https://bytecode77.com/public/fileicons/zip.png) r77 Rootkit 1.0.0.zip](https://bytecode77.com/downloads/r77Rootkit%201.0.0.zip)
+(**ZIP Password:** bytecode77)<br />
+[![](https://bytecode77.com/public/fileicons/pdf.png) Technical Documentation](https://bytecode77.com/downloads/r77%20Rootkit%20Technical%20Documentation.pdf)
 
 ## Project Page
 
-[![](https://bytecode77.com/images/shared/favicon16.png) bytecode77.com/hacking/payloads/r77-rootkit](https://bytecode77.com/hacking/payloads/r77-rootkit)
+[![](https://bytecode77.com/public/favicon16.png) bytecode77.com/r77-rootkit](https://bytecode77.com/r77-rootkit)
